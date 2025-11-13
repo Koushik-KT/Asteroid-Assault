@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Cosmic Collector</title>
+    <!-- PWA Manifest Link -->
     <link rel="manifest" href="manifest.json"> 
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
@@ -114,6 +115,7 @@
             text-transform: uppercase;
         }
     </style>
+    <!-- Firebase SDKs -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
@@ -150,6 +152,7 @@
     <div id="messageBox" class="hidden">
         <h2 id="messageTitle" class="text-2xl mb-4 text-orange-400"></h2>
         <p id="messageBody" class="mb-6"></p>
+        <!-- Leaderboard will be injected here -->
         <div id="leaderboard-container"></div>
         <button id="startButton" class="action-button">START GAME</button>
     </div>
@@ -185,6 +188,7 @@
     let appId;
     let userId;
     let isAuthReady = false;
+    let isLeaderboardActive = true; // NEW: Assume active unless config is missing or authentication fails
     let highScores = [];
 
     // --- Firebase Initialization and Auth ---
@@ -192,7 +196,8 @@
     async function initFirebaseAndAuth() {
         if (!window.firebase) {
             console.error("Firebase SDKs not loaded.");
-            showScreen('error', 'Error', 'Firebase SDK failed to load.');
+            isLeaderboardActive = false;
+            initGame();
             return;
         }
         
@@ -201,38 +206,45 @@
         appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
 
         if (!firebaseConfig) {
-            console.error("Firebase config not available.");
-            showScreen('error', 'Error', 'Configuration missing. Cannot connect to database.');
+            // FIX: If config is missing (i.e., public GitHub Pages deployment), 
+            // disable the leaderboard but proceed with the game.
+            console.warn("Firebase config not available. Leaderboard disabled on public site.");
+            isLeaderboardActive = false;
+            isAuthReady = true; // Mark auth as ready for the core game logic
+            userId = 'public_user'; // Mock user ID for local scorekeeping
+            initGame();
             return;
         }
 
         try {
-            // 2. Initialize App and Services
+            // 2. Initialize App and Services (Only runs if config is present)
             const app = firebase.initializeApp(firebaseConfig);
             db = firebase.getFirestore(app);
             auth = firebase.getAuth(app);
-            firebase.setLogLevel('debug'); // Set log level for debugging
+            // firebase.setLogLevel('debug'); // Keep this line for debugging if needed
 
             // 3. Authenticate
             await new Promise(resolve => {
+                const initialToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+                
                 const unsubscribe = firebase.onAuthStateChanged(auth, async (user) => {
                     if (user) {
                         userId = user.uid;
-                        isAuthReady = true;
-                        console.log("Firebase initialized and signed in. User ID:", userId);
+                        console.log("Authenticated user found. ID:", userId);
+                    } else if (initialToken) {
+                        // Try custom token sign-in (for Canvas environment)
+                        await firebase.signInWithCustomToken(auth, initialToken);
+                        userId = auth.currentUser.uid;
+                        console.log("Signed in with custom token. ID:", userId);
                     } else {
-                        // Attempt custom token sign-in first, then anonymous sign-in
-                        const initialToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
-                        if (initialToken) {
-                            await firebase.signInWithCustomToken(auth, initialToken);
-                            userId = auth.currentUser.uid;
-                        } else {
-                            await firebase.signInAnonymously(auth);
-                            userId = auth.currentUser.uid;
-                        }
-                        isAuthReady = true;
-                        console.log("Firebase initialized and authenticated.");
+                        // Fallback: Sign in anonymously (for robust Canvas or private testing)
+                        await firebase.signInAnonymously(auth);
+                        userId = auth.currentUser.uid;
+                        console.log("Signed in anonymously. ID:", userId);
                     }
+                    
+                    isAuthReady = true;
+                    isLeaderboardActive = true; // Ensure leaderboard is active if auth succeeded
                     unsubscribe();
                     resolve();
                 });
@@ -242,7 +254,12 @@
             initGame();
         } catch (error) {
             console.error("Firebase initialization failed:", error);
-            showScreen('error', 'Error', 'Authentication failed. Check console for details.');
+            // If initialization fails, disable leaderboards but still run the game
+            isLeaderboardActive = false;
+            isAuthReady = true;
+            userId = 'error_user';
+            showScreen('error', 'Database Offline', 'Leaderboard connection failed. Game is playable.');
+            initGame();
         }
     }
 
@@ -250,19 +267,18 @@
 
     // Public collection path for high scores
     function getScoresCollectionRef() {
-        if (!db) return null;
+        if (!db || !isLeaderboardActive) return null;
         // Path: /artifacts/{appId}/public/data/highscores
         return firebase.collection(db, 'artifacts', appId, 'public', 'data', 'highscores');
     }
 
     async function saveHighScore() {
-        if (!isAuthReady || score === 0) return;
+        if (!isAuthReady || score === 0 || !isLeaderboardActive) return;
 
         const scoresRef = getScoresCollectionRef();
         if (!scoresRef) return;
 
         try {
-            // Use the user's ID as part of the document data, but let Firestore assign a random ID
             await firebase.addDoc(scoresRef, {
                 score: score,
                 userId: userId,
@@ -275,7 +291,7 @@
     }
 
     async function loadHighScores() {
-        if (!isAuthReady) return;
+        if (!isAuthReady || !isLeaderboardActive) return;
 
         const scoresRef = getScoresCollectionRef();
         if (!scoresRef) return;
@@ -307,6 +323,11 @@
     function renderLeaderboard() {
         leaderboardContainer.innerHTML = ''; // Clear previous leaderboard
 
+        if (!isLeaderboardActive) {
+            leaderboardContainer.innerHTML = '<p class="mt-4 text-orange-400">Leaderboard is disabled on this public site.</p>';
+            return;
+        }
+
         if (highScores.length === 0) {
             leaderboardContainer.innerHTML = '<p class="mt-4 text-gray-500">No high scores yet.</p>';
             return;
@@ -319,223 +340,81 @@
         highScores.forEach((entry, index) => {
             // Highlight the current user's entry
             const isCurrentUser = entry.userId === userId;
-            const rowClass = isCurrentUser ? 'text-orange-300 font-bold glow' : '';
+            const rowClass = isCurrentUser ? 'bg-orange-800/50' : '';
 
-            html += `<tr class="${rowClass}">`;
-            html += `<td>${index + 1}</td>`;
-            html += `<td>${entry.score}</td>`;
-            // Only show the first 8 chars of the ID by default
-            html += `<td>${isCurrentUser ? entry.userId : entry.userId.substring(0, 8)}</td>`; 
-            html += '</tr>';
+            // Truncate the User ID for display purposes
+            const displayUserId = entry.userId.length > 8 ? 
+                                  entry.userId.substring(0, 4) + '...' + entry.userId.substring(entry.userId.length - 4) : 
+                                  entry.userId;
+
+            html += `<tr class="${rowClass}">
+                        <td class="text-center">${index + 1}</td>
+                        <td class="text-right">${entry.score}</td>
+                        <td>${displayUserId}</td>
+                     </tr>`;
         });
 
         html += '</tbody></table>';
         leaderboardContainer.innerHTML = html;
-        
-        // Also display the user's ID prominently
-        messageBody.innerHTML += `<p class="mt-4 text-sm text-blue-300">Your User ID: ${userId}</p>`;
     }
 
-    // --- Utility Functions ---
-
-    function resizeCanvas() {
-        const container = document.getElementById('gameContainer');
-        canvas.width = container.clientWidth;
-        canvas.height = container.clientHeight - document.getElementById('uiPanel').offsetHeight;
-
-        if (player) {
-            player.x = canvas.width / 2;
-        }
-    }
-
-    /**
-     * Checks collision between the player (box) and any object (circle or box).
-     */
-    function checkCollision(obj) {
-        const pBounds = player.getBounds();
-
-        // 1. AABB vs AABB Collision (for EnemyShip)
-        if (obj.isEnemyShip) {
-            const eBounds = {
-                x: obj.x - obj.width / 2,
-                y: obj.y - obj.height / 2,
-                width: obj.width,
-                height: obj.height
-            };
-            return pBounds.x < eBounds.x + eBounds.width &&
-                   pBounds.x + pBounds.width > eBounds.x &&
-                   pBounds.y < eBounds.y + eBounds.height &&
-                   pBounds.y + pBounds.height > eBounds.y;
-        } 
-        
-        // 2. Circle/Point vs Player Box Center (for Projectile, Asteroid, Star)
-        // Uses the existing logic which relies on obj.radius
-        // Projectiles have a radius of 4, standard objects 10-25
-        const dx = obj.x - (pBounds.x + pBounds.width / 2);
-        const dy = obj.y - (pBounds.y + pBounds.height / 2);
-        const distance = Math.sqrt(dx * dx + dy * dy);
-        
-        return distance < (obj.radius || 0) + 10; // Use radius if available, else 0
-    }
-
-    // --- Game Classes (Updated) ---
+    // --- Game Objects and Drawing ---
 
     class Player {
-        constructor(x, y) {
-            this.width = 30;
-            this.height = 30;
+        constructor(x, y, radius, color) {
             this.x = x;
-            this.y = y - this.height;
-            this.speed = 250;
-        }
-
-        update(deltaTime) {
-            if (this.targetX !== undefined) {
-                const dx = this.targetX - this.x;
-                const distance = Math.abs(dx);
-                const step = this.speed * deltaTime;
-
-                if (distance > step) {
-                    this.x += Math.sign(dx) * step;
-                } else {
-                    this.x = this.targetX;
-                }
-            }
-            
-            this.x = Math.max(this.width / 2, Math.min(canvas.width - this.width / 2, this.x));
+            this.y = y;
+            this.radius = radius;
+            this.color = color;
+            this.targetX = x; // Target position for smooth movement
+            this.speed = 450; // pixels per second
         }
 
         draw() {
-            ctx.fillStyle = PLAYER_COLOR;
-            ctx.strokeStyle = '#c9fbff';
-            ctx.lineWidth = 2;
+            // Draw a simple spaceship/triangle
+            ctx.fillStyle = this.color;
             ctx.beginPath();
-            
-            // Draw a simple, futuristic ship (triangle pointing up)
-            ctx.moveTo(this.x, this.y);
-            ctx.lineTo(this.x - this.width / 2, this.y + this.height);
-            ctx.lineTo(this.x + this.width / 2, this.y + this.height);
+            ctx.moveTo(this.x, this.y - this.radius);
+            ctx.lineTo(this.x + this.radius, this.y + this.radius);
+            ctx.lineTo(this.x - this.radius, this.y + this.radius);
             ctx.closePath();
-            
             ctx.fill();
-            ctx.stroke();
 
-            // Simple thruster glow
-            ctx.fillStyle = 'rgba(255, 100, 0, 0.7)';
-            ctx.fillRect(this.x - 5, this.y + this.height, 10, 5);
-        }
-
-        getBounds() {
-            // Returns the player's bounding box
-            return {
-                x: this.x - this.width / 2,
-                y: this.y,
-                width: this.width,
-                height: this.height
-            };
-        }
-    }
-    
-    class EnemyProjectile {
-        constructor(x, y) {
-            this.x = x;
-            this.y = y;
-            this.radius = 4;
-            this.vy = 350; // Fast speed
-            this.color = ENEMY_COLOR;
-            this.destroyed = false;
-            this.isProjectile = true; // New identifier flag
-        }
-
-        update(deltaTime) {
-            this.y += this.vy * deltaTime;
-            if (this.y > canvas.height) {
-                this.destroyed = true;
-            }
-        }
-
-        draw() {
-            ctx.fillStyle = this.color;
-            ctx.shadowColor = this.color;
-            ctx.shadowBlur = 5;
+            // Draw a faint trail
+            ctx.fillStyle = 'rgba(0, 240, 255, 0.3)';
             ctx.beginPath();
-            ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+            ctx.arc(this.x, this.y + this.radius, this.radius / 2, 0, Math.PI * 2);
             ctx.fill();
-            ctx.shadowBlur = 0;
-        }
-    }
-
-    class EnemyShip {
-        constructor(x, y) {
-            this.x = x;
-            this.y = y;
-            this.width = 40;
-            this.height = 20;
-            this.vx = (Math.random() < 0.5 ? 1 : -1) * 70; // Slow horizontal movement
-            this.vy = 20; // Very slow downward movement
-            this.color = ENEMY_COLOR;
-            this.destroyed = false;
-            this.shootInterval = 1.0; // Shoot every 1 second
-            this.timeSinceLastShot = 0;
-            this.isEnemyShip = true; // New identifier flag
         }
 
         update(deltaTime) {
-            this.x += this.vx * deltaTime;
-            this.y += this.vy * deltaTime;
-
-            // Bounce off walls horizontally
-            if (this.x - this.width / 2 < 0 || this.x + this.width / 2 > canvas.width) {
-                this.vx *= -1;
-            }
-
-            // Shooting logic
-            this.timeSinceLastShot += deltaTime;
-            if (this.timeSinceLastShot >= this.shootInterval) {
-                this.shoot();
-                this.timeSinceLastShot = 0;
-            }
+            // Move player smoothly towards the targetX using deltaTime
+            const dx = this.targetX - this.x;
+            const distance = Math.abs(dx);
             
-            // Check if off-screen (despawn)
-            if (this.y > canvas.height + this.height) {
-                this.destroyed = true;
+            if (distance > 1) {
+                const moveAmount = Math.min(distance, this.speed * deltaTime);
+                this.x += dx > 0 ? moveAmount : -moveAmount;
             }
+
+            // Clamp player position within the canvas boundaries
+            this.x = Math.max(this.radius, Math.min(canvas.width - this.radius, this.x));
         }
 
-        shoot() {
-            // Fires a new projectile downward from the ship's center
-            const projectile = new EnemyProjectile(this.x, this.y + this.height / 2);
-            gameObjects.push(projectile);
-        }
-
-        draw() {
-            ctx.fillStyle = this.color;
-            ctx.strokeStyle = '#c9fbff';
-            ctx.lineWidth = 2;
-
-            // Draw a flat, boxy ship
-            ctx.fillRect(this.x - this.width / 2, this.y - this.height / 2, this.width, this.height);
-            ctx.strokeRect(this.x - this.width / 2, this.y - this.height / 2, this.width, this.height);
+        // Used by input handlers to set the desired location
+        setTargetX(newX) {
+            this.targetX = newX;
         }
     }
 
     class GameObject {
-        // Used for Stars and Asteroids
-        constructor(x, y, radius, type) {
+        constructor(x, y, radius, color, velocityY) {
             this.x = x;
             this.y = y;
             this.radius = radius;
-            this.type = type; // 'asteroid' or 'star'
-            this.vy = type === 'star' ? 100 : 150;
-            this.color = type === 'star' ? STAR_COLOR : ASTEROID_COLOR;
-            this.destroyed = false;
-        }
-
-        update(deltaTime) {
-            this.y += this.vy * deltaTime;
-            if (this.y > canvas.height + this.radius) {
-                this.destroyed = true;
-            }
+            this.color = color;
+            this.velocityY = velocityY;
+            this.active = true;
         }
 
         draw() {
@@ -543,321 +422,346 @@
             ctx.beginPath();
             ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
             ctx.fill();
-            
-            if (this.type === 'asteroid') {
-                ctx.strokeStyle = '#ff8c00';
-                ctx.lineWidth = 2;
-                ctx.stroke();
-            } else {
-                ctx.shadowColor = STAR_COLOR;
-                ctx.shadowBlur = 10;
-                ctx.fillStyle = STAR_COLOR;
-                ctx.fill();
-                ctx.shadowBlur = 0;
+        }
+
+        update(deltaTime) {
+            this.y += this.velocityY * deltaTime;
+            if (this.y > canvas.height + this.radius) {
+                this.active = false; // Mark for removal
             }
         }
     }
 
-    // --- Game Logic ---
+    class Asteroid extends GameObject {
+        constructor(x, y) {
+            // Randomize size and speed
+            const radius = Math.random() * 15 + 10;
+            const velocityY = Math.random() * 100 + 150;
+            super(x, y, radius, ASTEROID_COLOR, velocityY);
+            this.rotation = 0;
+            this.rotationSpeed = Math.random() * 0.5 - 0.25; // Random rotation direction
+        }
 
-    async function initGame() {
+        draw() {
+            // Draw jagged asteroid shape instead of a perfect circle
+            ctx.save();
+            ctx.translate(this.x, this.y);
+            this.rotation += this.rotationSpeed * (lastTime - performance.now()) / 1000;
+            ctx.rotate(this.rotation);
+
+            ctx.fillStyle = this.color;
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+            ctx.lineWidth = 2;
+
+            ctx.beginPath();
+            const segments = 8;
+            for (let i = 0; i < segments; i++) {
+                const angle = (i / segments) * Math.PI * 2;
+                const r = this.radius * (1 + (Math.random() * 0.3 - 0.15)); // Jitter radius
+                const x = r * Math.cos(angle);
+                const y = r * Math.sin(angle);
+                if (i === 0) {
+                    ctx.moveTo(x, y);
+                } else {
+                    ctx.lineTo(x, y);
+                }
+            }
+            ctx.closePath();
+            ctx.fill();
+            ctx.stroke();
+            ctx.restore();
+        }
+    }
+
+    class Star extends GameObject {
+        constructor(x, y) {
+            const radius = 5;
+            const velocityY = Math.random() * 80 + 100;
+            super(x, y, radius, STAR_COLOR, velocityY);
+        }
+        
+        draw() {
+            // Draw a star shape (4-point cross) for better visibility
+            ctx.fillStyle = this.color;
+            ctx.shadowColor = this.color;
+            ctx.shadowBlur = 10;
+
+            ctx.beginPath();
+            ctx.moveTo(this.x, this.y - this.radius * 1.5);
+            ctx.lineTo(this.x + this.radius * 0.5, this.y - this.radius * 0.5);
+            ctx.lineTo(this.x + this.radius * 1.5, this.y);
+            ctx.lineTo(this.x + this.radius * 0.5, this.y + this.radius * 0.5);
+            ctx.lineTo(this.x, this.y + this.radius * 1.5);
+            ctx.lineTo(this.x - this.radius * 0.5, this.y + this.radius * 0.5);
+            ctx.lineTo(this.x - this.radius * 1.5, this.y);
+            ctx.lineTo(this.x - this.radius * 0.5, this.y - this.radius * 0.5);
+            ctx.closePath();
+            ctx.fill();
+            
+            ctx.shadowBlur = 0; // Reset shadow
+        }
+    }
+
+    class EnemyShip extends GameObject {
+        constructor(x, y) {
+            const radius = 15;
+            const velocityY = 100;
+            super(x, y, radius, ENEMY_COLOR, velocityY);
+            this.fireTimer = 0;
+            this.fireRate = Math.random() * 3 + 2; // Fire every 2 to 5 seconds
+        }
+
+        draw() {
+            // Draw a simple enemy ship (upside-down triangle)
+            ctx.fillStyle = this.color;
+            ctx.beginPath();
+            ctx.moveTo(this.x, this.y + this.radius);
+            ctx.lineTo(this.x + this.radius, this.y - this.radius);
+            ctx.lineTo(this.x - this.radius, this.y - this.radius);
+            ctx.closePath();
+            ctx.fill();
+        }
+
+        update(deltaTime) {
+            super.update(deltaTime);
+            this.fireTimer += deltaTime;
+            if (this.fireTimer >= this.fireRate) {
+                this.fireProjectile();
+                this.fireTimer = 0;
+            }
+        }
+
+        fireProjectile() {
+            const projectile = new Projectile(this.x, this.y + this.radius, 5);
+            gameObjects.push(projectile);
+        }
+    }
+
+    class Projectile extends GameObject {
+        constructor(x, y, radius) {
+            // Projectiles are fast
+            super(x, y, radius, ENEMY_COLOR, 300);
+        }
+
+        draw() {
+            // Draw a small, bright magenta square/dot
+            ctx.fillStyle = this.color;
+            ctx.shadowColor = this.color;
+            ctx.shadowBlur = 8;
+            ctx.fillRect(this.x - this.radius, this.y - this.radius, this.radius * 2, this.radius * 2);
+            ctx.shadowBlur = 0;
+        }
+    }
+
+    // --- Game Logic Functions ---
+
+    function initGame() {
+        // Set canvas size based on container
+        const container = document.getElementById('gameContainer');
+        canvas.width = container.clientWidth;
+        canvas.height = container.clientHeight - 40; // Subtract UI panel height
+
+        player = new Player(canvas.width / 2, canvas.height - 50, 15, PLAYER_COLOR);
+        gameObjects = [];
         score = 0;
         lives = 3;
-        resizeCanvas();
-
-        player = new Player(canvas.width / 2, canvas.height - 10);
-        player.targetX = player.x;
-
-        gameObjects = [];
-        timeToSpawn = 1.5;
-        timeSinceLastSpawn = 0;
-
-        updateUI();
         
-        await loadHighScores(); 
-        showScreen('menu', 'ASTEROID ASSAULT', 'Collect stars, dodge debris (orange) and enemy fire (magenta).');
+        scoreDisplay.textContent = `SCORE: ${score}`;
+        livesDisplay.textContent = `LIVES: ${lives}`;
+        
+        showScreen('menu', 'ASTEROID ASSAULT', 'Collect stars, dodge danger!');
     }
 
     function startGame() {
         if (gameState !== 'running') {
             gameState = 'running';
             messageBox.classList.add('hidden');
-            lastTime = performance.now(); 
+            lastTime = performance.now();
+            timeSinceLastSpawn = 0;
             gameLoopId = requestAnimationFrame(gameLoop);
         }
     }
 
-    function showScreen(mode, title = '', body = '') {
-        gameState = mode;
-        if (mode === 'running') {
-            messageBox.classList.add('hidden');
-            leaderboardContainer.innerHTML = '';
-        } else {
-            messageTitle.textContent = title;
-            messageBody.textContent = body;
-            startButton.textContent = mode === 'menu' ? 'START GAME' : 'RESTART';
-            messageBox.classList.remove('hidden');
-            
-            if (mode === 'menu' || mode === 'gameover') {
-                renderLeaderboard();
-            }
-        }
-    }
-
-    function spawnObject() {
-        const x = Math.random() * canvas.width;
-        
-        // 90% chance for standard object, 10% chance for Enemy Ship
-        if (Math.random() < 0.1) { 
-            // Spawn EnemyShip near the top
-            gameObjects.push(new EnemyShip(x, 0));
-        } else {
-            const radius = Math.random() * 15 + 10;
-            const type = Math.random() < 0.7 ? 'star' : 'asteroid'; // 70% stars, 30% asteroids
-            gameObjects.push(new GameObject(x, -radius, radius, type));
-        }
-
-        // Difficulty increases by decreasing spawn time
-        timeToSpawn = Math.max(0.3, timeToSpawn * 0.99); 
-    }
-
-    function handleDamage(flashColor = 'rgba(255, 0, 0, 0.4)') {
-        lives -= 1;
-        document.getElementById('uiPanel').style.backgroundColor = flashColor;
-        setTimeout(() => {
-            document.getElementById('uiPanel').style.backgroundColor = 'rgba(0, 240, 255, 0.1)';
-        }, 100);
-    }
-
-    function update(deltaTime) {
-        if (gameState !== 'running') return;
-
-        // 1. Spawn Logic
-        timeSinceLastSpawn += deltaTime;
-        if (timeSinceLastSpawn >= timeToSpawn) {
-            spawnObject();
-            timeSinceLastSpawn = 0;
-        }
-
-        // 2. Update and check collisions for all objects
-        for (let i = gameObjects.length - 1; i >= 0; i--) {
-            const obj = gameObjects[i];
-            
-            // Call update() on the object, which handles movement AND enemy shooting
-            obj.update(deltaTime); 
-
-            if (checkCollision(obj)) {
-                obj.destroyed = true;
-
-                // Handle damage/score based on object type
-                if (obj.isProjectile) {
-                    // Collision with Enemy Projectile (Red flash)
-                    handleDamage('rgba(255, 0, 0, 0.4)');
-                }
-                else if (obj.isEnemyShip) {
-                    // Collision with Enemy Ship (Instant Game Over)
-                    lives = 0; 
-                    handleDamage('rgba(255, 0, 0, 0.8)'); // Very intense flash
-                }
-                else if (obj.type === 'star') {
-                    // Collision with Star (Score up)
-                    score += 10;
-                } else if (obj.type === 'asteroid') {
-                    // Collision with Asteroid (Orange flash)
-                    handleDamage('rgba(255, 69, 0, 0.4)'); 
-                }
-            }
-        }
-        
-        // 3. Clean up destroyed/off-screen objects
-        gameObjects = gameObjects.filter(obj => !obj.destroyed);
-
-        // 4. Update Player
-        player.update(deltaTime);
-
-        // 5. Update UI and check Game Over
-        updateUI();
-
-        if (lives <= 0) {
-            gameOver();
-        }
-    }
-
-    function draw() {
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        
-        ctx.fillStyle = '#000008';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-        player.draw();
-        gameObjects.forEach(obj => obj.draw());
-    }
-
-    function updateUI() {
-        scoreDisplay.textContent = `SCORE: ${score}`;
-        livesDisplay.textContent = `LIVES: ${lives}`;
-    }
-
-    async function gameOver() {
+    function endGame() {
+        gameState = 'gameover';
         cancelAnimationFrame(gameLoopId);
         
-        await saveHighScore();
-        await loadHighScores();
-
-        showScreen(
-            'gameover', 
-            'GAME OVER', 
-            `Your ship was disabled! Final Score: ${score}`
-        );
+        // Save the score before showing the screen
+        if (isLeaderboardActive) {
+            saveHighScore().then(() => {
+                showScreen('gameover', 'GAME OVER', `Final Score: ${score}`);
+            });
+        } else {
+            // If leaderboard is not active, show score immediately
+            showScreen('gameover', 'GAME OVER', `Final Score: ${score}`);
+        }
     }
 
-    // --- Game Loop ---
+    function showScreen(type, title, body) {
+        messageTitle.textContent = title;
+        messageBody.textContent = body;
+        startButton.textContent = (type === 'menu' || type === 'error') ? 'START GAME' : 'PLAY AGAIN';
+        messageBox.classList.remove('hidden');
 
-    function gameLoop(timestamp) {
-        const deltaTime = (timestamp - lastTime) / 1000;
-        lastTime = timestamp;
-
+        if (type === 'gameover' && isLeaderboardActive) {
+            loadHighScores().then(renderLeaderboard);
+        } else {
+            renderLeaderboard(); // Renders placeholder if not active
+        }
+    }
+    
+    // --- Input Handlers ---
+    
+    // Handle mouse movement
+    canvas.addEventListener('mousemove', (e) => {
         if (gameState === 'running') {
-            update(deltaTime);
-            draw();
+            player.setTargetX(e.offsetX);
         }
+    });
 
-        gameLoopId = requestAnimationFrame(gameLoop);
-    }
-
-    // --- Input Handlers and Initialization ---
-    
-    function handlePointerMove(event) {
-        if (gameState !== 'running') return;
-        
-        const rect = canvas.getBoundingClientRect();
-        const clientX = event.touches ? event.touches[0].clientX : event.clientX;
-        const targetX = clientX - rect.left;
-        
-        player.targetX = targetX;
-        
-        if (event.touches) {
-            event.preventDefault();
+    // Handle touch movement
+    canvas.addEventListener('touchmove', (e) => {
+        if (gameState === 'running' && e.touches.length > 0) {
+            e.preventDefault();
+            const touchX = e.touches[0].clientX;
+            const rect = canvas.getBoundingClientRect();
+            const relativeX = touchX - rect.left;
+            player.setTargetX(relativeX);
         }
-    }
+    });
     
-    function handleKeydown(event) {
-        if (event.key === ' ' && gameState !== 'running') {
-            startGame();
-        }
-    }
-
-    // Attach listeners
-    canvas.addEventListener('mousemove', handlePointerMove);
-    canvas.addEventListener('touchmove', handlePointerMove, { passive: false });
-    
+    // Handle start button click
     startButton.addEventListener('click', () => {
-        if (gameState === 'menu' || gameState === 'gameover') {
+        if (gameState === 'loading' || gameState === 'error' || gameState === 'menu') {
+            startGame();
+        } else if (gameState === 'gameover') {
+            initGame();
             startGame();
         }
     });
 
-    document.addEventListener('keydown', handleKeydown);
-    window.addEventListener('resize', resizeCanvas);
+    // --- Collision Detection ---
 
-    // Initial load starts the Firebase initialization
-    window.onload = initFirebaseAndAuth;
+    function checkCollision(obj1, obj2) {
+        const dx = obj1.x - obj2.x;
+        const dy = obj1.y - obj2.y;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+        return distance < obj1.radius + obj2.radius;
+    }
 
-    // --- PWA Service Worker Logic and Registration (Embedded) ---
-    const serviceWorkerContent = `
-        const CACHE_NAME = 'cosmic-collector-v1';
-        // List all files and critical external dependencies that must be cached for offline play.
-        const urlsToCache = [
-            '/', // Caches index.html
-            'manifest.json',
-            // External Critical Dependencies:
-            'https://cdn.tailwindcss.com',
-            'https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&display=swap',
-            // Firebase SDKs are required for leaderboards but will load from cache when offline.
-            'https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js',
-            'https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js',
-            'https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js',
-        ];
+    function handleCollisions() {
+        for (let i = gameObjects.length - 1; i >= 0; i--) {
+            const obj = gameObjects[i];
 
-        // 1. Install Event: Caches all static assets
-        self.addEventListener('install', (event) => {
-            // Force the waiting service worker to become the active service worker
-            self.skipWaiting();
-            
-            event.waitUntil(
-                caches.open(CACHE_NAME)
-                    .then((cache) => {
-                        console.log('Service Worker: Caching App Shell assets.');
-                        // Attempt to cache all URLs, catching errors for external resources that might fail initially
-                        return cache.addAll(urlsToCache).catch((error) => {
-                            console.error('Service Worker: Failed to cache some URLs:', error);
-                        });
-                    })
-            );
-        });
+            if (checkCollision(player, obj)) {
+                if (obj instanceof Star) {
+                    score += 10;
+                    scoreDisplay.textContent = `SCORE: ${score}`;
+                    obj.active = false;
+                } else if (obj instanceof Asteroid) {
+                    // Asteroid hit
+                    lives--;
+                    livesDisplay.textContent = `LIVES: ${lives}`;
+                    obj.active = false;
+                    document.getElementById('uiPanel').style.backgroundColor = 'rgba(255, 69, 0, 0.4)';
+                    setTimeout(() => document.getElementById('uiPanel').style.backgroundColor = 'rgba(0, 240, 255, 0.1)', 100);
+                    
+                } else if (obj instanceof EnemyShip || obj instanceof Projectile) {
+                    // Instant game over on enemy/projectile hit
+                    lives = 0;
+                    obj.active = false;
+                }
+                
+                if (lives <= 0) {
+                    endGame();
+                    return;
+                }
+            }
+        }
+        
+        // Remove inactive objects
+        gameObjects = gameObjects.filter(obj => obj.active);
+    }
+    
+    // --- Spawning Logic ---
 
-        // 2. Activate Event: Cleans up old caches
-        self.addEventListener('activate', (event) => {
-            event.waitUntil(
-                caches.keys().then((cacheNames) => {
-                    return Promise.all(
-                        cacheNames.map((cacheName) => {
-                            if (cacheName !== CACHE_NAME) {
-                                console.log('Service Worker: Deleting old cache:', cacheName);
-                                return caches.delete(cacheName);
-                            }
-                        })
-                    );
-                })
-            );
-        });
+    function spawnObject(deltaTime) {
+        timeSinceLastSpawn += deltaTime;
 
-        // 3. Fetch Event: Serves content from cache first, then falls back to network
-        self.addEventListener('fetch', (event) => {
-            // Only respond to GET requests
-            if (event.request.method !== 'GET') return;
-            
-            // Intercept requests and serve from cache if available
-            event.respondWith(
-                caches.match(event.request)
-                    .then((response) => {
-                        // Cache hit - return response
-                        if (response) {
-                            return response;
-                        }
-                        // No cache hit - fetch from network
-                        return fetch(event.request);
-                    })
-            );
-        });
-    `;
+        // Decrease timeToSpawn as score increases for difficulty scaling
+        if (score < 500) {
+             timeToSpawn = Math.max(0.3, 1.5 - score / 1000); // Max spawn rate 0.3s
+        } else {
+             timeToSpawn = 0.3;
+        }
 
+        if (timeSinceLastSpawn >= timeToSpawn) {
+            timeSinceLastSpawn = 0;
 
+            const x = Math.random() * (canvas.width - 40) + 20;
+            const y = -20;
+            const type = Math.random();
+
+            if (type < 0.6) {
+                // 60% chance: Asteroid
+                gameObjects.push(new Asteroid(x, y));
+            } else if (type < 0.9) {
+                // 30% chance: Star
+                gameObjects.push(new Star(x, y));
+            } else if (score > 100 && type < 1.0) {
+                // 10% chance: Enemy Ship (only after 100 points)
+                gameObjects.push(new EnemyShip(x, y));
+            }
+        }
+    }
+    
+    // --- Game Loop ---
+
+    function gameLoop(timestamp) {
+        const deltaTime = (timestamp - lastTime) / 1000; // Time in seconds
+        lastTime = timestamp;
+
+        if (gameState !== 'running') return;
+
+        // Clear the canvas
+        ctx.fillStyle = '#000008';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        
+        // 1. Update
+        player.update(deltaTime);
+        gameObjects.forEach(obj => obj.update(deltaTime));
+        
+        spawnObject(deltaTime);
+        handleCollisions();
+
+        // 2. Draw
+        gameObjects.forEach(obj => obj.draw());
+        player.draw();
+
+        gameLoopId = requestAnimationFrame(gameLoop);
+    }
+    
+    // Resize handler to maintain aspect ratio and reposition player
+    window.addEventListener('resize', initGame);
+    
+    // Start the Firebase initialization process
+    window.onload = function () {
+        initFirebaseAndAuth();
+    }
+    
+    // --- PWA Service Worker Registration (Embedded) ---
     if ('serviceWorker' in navigator) {
         window.addEventListener('load', () => {
-            try {
-                // 1. Create a Blob from the SW content string, ensuring correct MIME type
-                const swBlob = new Blob([serviceWorkerContent], { type: 'application/javascript' });
-                // 2. Create an object URL for the Blob (this starts with 'blob:')
-                const swUrl = URL.createObjectURL(swBlob);
-                
-                // 3. Register the Blob URL. The browser can now handle this protocol.
-                navigator.serviceWorker.register(swUrl, { scope: '/' })
-                    .then(registration => {
-                        console.log('Service Worker registered successfully via Blob URL:', registration.scope);
-                        // Clean up the Blob URL after registration attempt
-                        URL.revokeObjectURL(swUrl); 
-                    })
-                    .catch(error => {
-                        console.error('Service Worker registration failed:', error);
-                    });
-            } catch (e) {
-                console.error('Service Worker registration error during Blob creation:', e);
-            }
+            navigator.serviceWorker.register('manifest.json', { scope: './' })
+                .then(registration => {
+                    console.log('ServiceWorker registered successfully: ', registration.scope);
+                })
+                .catch(err => {
+                    console.warn('ServiceWorker registration failed: ', err);
+                });
         });
     }
 
 </script>
-
 </body>
 </html>
