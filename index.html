@@ -160,6 +160,8 @@
 
 <script type="text/javascript">
     // --- Global Variables and Setup ---
+   <script type="text/javascript">
+    // --- Global Variables and Setup ---
     const canvas = document.getElementById('gameCanvas');
     const ctx = canvas.getContext('2d');
     const scoreDisplay = document.getElementById('score');
@@ -188,7 +190,7 @@
     let appId;
     let userId;
     let isAuthReady = false;
-    let isLeaderboardActive = true; // NEW: Assume active unless config is missing or authentication fails
+    let isLeaderboardActive = true; 
     let highScores = [];
 
     // --- Firebase Initialization and Auth ---
@@ -258,8 +260,8 @@
             isLeaderboardActive = false;
             isAuthReady = true;
             userId = 'error_user';
-            showScreen('error', 'Database Offline', 'Leaderboard connection failed. Game is playable.');
-            initGame();
+            // Do not show error screen, just proceed to game menu
+            initGame(); 
         }
     }
 
@@ -561,14 +563,19 @@
         canvas.width = container.clientWidth;
         canvas.height = container.clientHeight - 40; // Subtract UI panel height
 
+        // Player initial position and target should be correctly set on resize/init
         player = new Player(canvas.width / 2, canvas.height - 50, 15, PLAYER_COLOR);
+        
+        // Reset game state
         gameObjects = [];
         score = 0;
         lives = 3;
+        timeSinceLastSpawn = 0; // Reset timer
         
         scoreDisplay.textContent = `SCORE: ${score}`;
         livesDisplay.textContent = `LIVES: ${lives}`;
         
+        removeInputListeners(); // Clear old listeners before showing menu
         showScreen('menu', 'ASTEROID ASSAULT', 'Collect stars, dodge danger!');
     }
 
@@ -577,7 +584,10 @@
             gameState = 'running';
             messageBox.classList.add('hidden');
             lastTime = performance.now();
-            timeSinceLastSpawn = 0;
+            
+            // Re-add input listeners when the game starts
+            addInputListeners(); 
+            
             gameLoopId = requestAnimationFrame(gameLoop);
         }
     }
@@ -585,6 +595,7 @@
     function endGame() {
         gameState = 'gameover';
         cancelAnimationFrame(gameLoopId);
+        removeInputListeners(); // Remove listeners on game over
         
         // Save the score before showing the screen
         if (isLeaderboardActive) {
@@ -612,24 +623,38 @@
     
     // --- Input Handlers ---
     
-    // Handle mouse movement
-    canvas.addEventListener('mousemove', (e) => {
+    // Unified function to handle input position from mouse or touch
+    function handleInput(clientX) {
         if (gameState === 'running') {
-            player.setTargetX(e.offsetX);
-        }
-    });
-
-    // Handle touch movement
-    canvas.addEventListener('touchmove', (e) => {
-        if (gameState === 'running' && e.touches.length > 0) {
-            e.preventDefault();
-            const touchX = e.touches[0].clientX;
             const rect = canvas.getBoundingClientRect();
-            const relativeX = touchX - rect.left;
+            const relativeX = clientX - rect.left;
             player.setTargetX(relativeX);
         }
-    });
+    }
+
+    const mouseMoveHandler = (e) => {
+        handleInput(e.clientX);
+    };
+
+    const touchMoveHandler = (e) => {
+        if (e.touches.length > 0) {
+            e.preventDefault();
+            handleInput(e.touches[0].clientX);
+        }
+    };
     
+    // Function to add listeners
+    function addInputListeners() {
+        canvas.addEventListener('mousemove', mouseMoveHandler);
+        canvas.addEventListener('touchmove', touchMoveHandler, { passive: false });
+    }
+
+    // Function to remove listeners
+    function removeInputListeners() {
+        canvas.removeEventListener('mousemove', mouseMoveHandler);
+        canvas.removeEventListener('touchmove', touchMoveHandler);
+    }
+
     // Handle start button click
     startButton.addEventListener('click', () => {
         if (gameState === 'loading' || gameState === 'error' || gameState === 'menu') {
@@ -765,3 +790,4 @@
 </script>
 </body>
 </html>
+
