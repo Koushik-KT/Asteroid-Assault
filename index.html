@@ -25,9 +25,10 @@
 
         #gameContainer {
             position: relative;
-            width: 95vw;
-            max-width: 600px;
-            aspect-ratio: 1 / 1.5; /* Tall aspect ratio for mobile-friendly play area */
+            /* Optimized for desktop: wider container */
+            width: 90vw;
+            max-width: 800px; /* Allow wider game screen */
+            aspect-ratio: 1 / 1.35; /* Slightly less tall aspect ratio */
             border: 4px solid #00f0ff;
             box-shadow: 0 0 20px #00f0ff;
             background-color: #000008;
@@ -36,11 +37,14 @@
             display: flex;
             flex-direction: column;
         }
-
+        
         #gameCanvas {
-            flex-grow: 1;
+            flex-grow = 1;
             display: block;
             touch-action: none; /* Prevent default touch behavior */
+            /* Ensure canvas fills available space */
+            width: 100%;
+            height: 100%;
         }
 
         #uiPanel {
@@ -52,7 +56,9 @@
             align-items: center;
             font-size: 1rem;
             text-shadow: 0 0 5px #00f0ff;
-            transition: background-color 0.1s; /* Add smooth transition for damage flash */
+            transition: background-color 0.1s;
+            /* Fixed height for UI panel */
+            min-height: 40px; 
         }
 
         #messageBox {
@@ -67,7 +73,7 @@
             border-radius: 10px;
             text-align: center;
             z-index: 100;
-            max-width: 90%; /* Ensure it fits on smaller screens */
+            max-width: 90%;
         }
 
         .action-button {
@@ -87,6 +93,21 @@
             transform: translateY(-2px);
             box-shadow: 0 6px 15px rgba(255, 69, 0, 0.7);
         }
+        
+        /* Style for the LLM buttons */
+        #debriefButton, #listenButton {
+            background: linear-gradient(135deg, #00f0ff, #008cff);
+            color: #0d0c1d;
+            box-shadow: 0 4px 10px rgba(0, 240, 255, 0.5);
+        }
+        #debriefButton:hover, #listenButton:hover {
+            box-shadow: 0 6px 15px rgba(0, 240, 255, 0.7);
+        }
+        #listenButton:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
 
         .glow {
             animation: pulse 1s infinite alternate;
@@ -113,6 +134,15 @@
         #leaderboard th {
             color: #00f0ff;
             text-transform: uppercase;
+        }
+        
+        /* Style for the LLM Debrief Container */
+        #debriefContainer {
+            animation: fadeIn 0.5s ease-out;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
         }
     </style>
     <!-- Firebase SDKs -->
@@ -152,15 +182,27 @@
     <div id="messageBox" class="hidden">
         <h2 id="messageTitle" class="text-2xl mb-4 text-orange-400"></h2>
         <p id="messageBody" class="mb-6"></p>
+
+        <!-- LLM Debriefing Result Area -->
+        <div id="debriefContainer" class="text-sm text-left mx-auto max-w-sm mb-4 p-3 rounded bg-blue-900/40 hidden">
+            <h4 class="text-cyan-400 font-bold mb-2">STAR COMMAND DEBRIEF</h4>
+            <p id="debriefText" class="text-gray-300"></p>
+        </div>
+        
         <!-- Leaderboard will be injected here -->
         <div id="leaderboard-container"></div>
-        <button id="startButton" class="action-button">START GAME</button>
+        
+        <!-- Action Buttons -->
+        <div class="flex flex-col sm:flex-row justify-center gap-4 mt-4">
+            <button id="startButton" class="action-button">START GAME</button>
+            <button id="debriefButton" class="action-button hidden">Generate Debrief ✨</button>
+            <!-- NEW: TTS Button -->
+            <button id="listenButton" class="action-button hidden">Listen to Debrief 🔊</button>
+        </div>
     </div>
 </div>
 
 <script type="text/javascript">
-    // --- Global Variables and Setup ---
-   <script type="text/javascript">
     // --- Global Variables and Setup ---
     const canvas = document.getElementById('gameCanvas');
     const ctx = canvas.getContext('2d');
@@ -171,6 +213,13 @@
     const messageBody = document.getElementById('messageBody');
     const startButton = document.getElementById('startButton');
     const leaderboardContainer = document.getElementById('leaderboard-container');
+    
+    // New LLM Elements
+    const debriefButton = document.getElementById('debriefButton');
+    const debriefContainer = document.getElementById('debriefContainer');
+    const debriefText = document.getElementById('debriefText');
+    const listenButton = document.getElementById('listenButton'); // NEW
+    const API_KEY = ""; // API key for Gemini LLM
 
     let gameLoopId;
     let gameState = 'loading'; // Start in loading state for Firebase
@@ -183,6 +232,65 @@
     const ASTEROID_COLOR = '#ff4500';
     const STAR_COLOR = '#ffff00';
     const ENEMY_COLOR = '#ff00ff'; // Magenta for enemies/projectiles
+
+    let currentDebriefText = ''; // Holds the generated debrief text for TTS
+
+    // --- TTS Utility Functions (PCM to WAV conversion) ---
+
+    // Converts base64 string to ArrayBuffer
+    function base64ToArrayBuffer(base64) {
+        const binaryString = atob(base64);
+        const len = binaryString.length;
+        const bytes = new Uint8Array(len);
+        for (let i = 0; i < len; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+        }
+        return bytes.buffer;
+    }
+
+    // Converts PCM audio data to a WAV Blob
+    function pcmToWav(pcm16, sampleRate) {
+        const numChannels = 1;
+        const bitsPerSample = 16;
+        const byteRate = sampleRate * numChannels * (bitsPerSample / 8);
+        const blockAlign = numChannels * (bitsPerSample / 8);
+        const dataSize = pcm16.byteLength;
+        const buffer = new ArrayBuffer(44 + dataSize);
+        const view = new DataView(buffer);
+        
+        // Write WAV header
+        function writeString(view, offset, string) {
+            for (let i = 0; i < string.length; i++) {
+                view.setUint8(offset + i, string.charCodeAt(i));
+            }
+        }
+
+        // RIFF chunk
+        writeString(view, 0, 'RIFF'); // ChunkID
+        view.setUint32(4, 36 + dataSize, true); // ChunkSize
+        writeString(view, 8, 'WAVE'); // Format
+
+        // FMT sub-chunk
+        writeString(view, 12, 'fmt '); // Subchunk1ID
+        view.setUint32(16, 16, true); // Subchunk1Size (16 for PCM)
+        view.setUint16(20, 1, true); // AudioFormat (1 for PCM)
+        view.setUint16(22, numChannels, true); // NumChannels
+        view.setUint32(24, sampleRate, true); // SampleRate
+        view.setUint32(28, byteRate, true); // ByteRate
+        view.setUint16(32, blockAlign, true); // BlockAlign
+        view.setUint16(34, bitsPerSample, true); // BitsPerSample
+
+        // Data sub-chunk
+        writeString(view, 36, 'data'); // Subchunk2ID
+        view.setUint32(40, dataSize, true); // Subchunk2Size
+
+        // Write PCM data
+        let offset = 44;
+        const pcmDataArray = new Int16Array(buffer, 44, pcm16.length);
+        pcmDataArray.set(pcm16); // Copy the PCM data
+
+        return new Blob([buffer], { type: 'audio/wav' });
+    }
 
     // --- Firebase Variables ---
     let db;
@@ -360,6 +468,176 @@
         leaderboardContainer.innerHTML = html;
     }
 
+    // --- Gemini LLM Logic (New Feature) ---
+
+    // Utility function for exponential backoff
+    async function fetchWithRetry(url, options, maxRetries = 5) {
+        for (let i = 0; i < maxRetries; i++) {
+            try {
+                const response = await fetch(url, options);
+                if (response.status !== 429) { // Not a Rate Limit error
+                    return response;
+                }
+                const delay = Math.pow(2, i) * 1000 + Math.random() * 1000;
+                console.warn(`Rate limit hit, retrying in ${delay / 1000}s...`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+            } catch (error) {
+                if (i === maxRetries - 1) throw error;
+                const delay = Math.pow(2, i) * 1000 + Math.random() * 1000;
+                console.error(`Fetch failed, retrying in ${delay / 1000}s...`, error);
+                await new Promise(resolve => setTimeout(resolve, delay));
+            }
+        }
+        throw new Error("Failed to fetch after multiple retries.");
+    }
+    
+    /**
+     * Calls the Gemini API to generate a dramatic mission debrief based on the score.
+     */
+    async function generateCosmicDebrief() {
+        debriefButton.disabled = true;
+        debriefButton.textContent = "DEBRIEFING...";
+        debriefContainer.classList.remove('hidden');
+        debriefText.textContent = "Connecting to Star Command servers...";
+        listenButton.classList.add('hidden'); // Hide listen button while generating text
+
+        // Truncate user ID for lore purposes
+        const userIdSnippet = userId.length > 8 ? 
+                              userId.substring(0, 4) + '...' + userId.substring(userId.length - 4) : 
+                              userId;
+
+        const systemPrompt = 
+            `You are the Star Command's Mission Debriefing AI, codename 'ORACLE-7'. 
+            Your reports must be dramatic, concise (under 80 words), and written in a formal, sci-fi tone. 
+            The goal is to summarize the pilot's performance based on their score.`;
+        
+        const userQuery = 
+            `Pilot ${userIdSnippet} achieved a final score of ${score}. 
+            Generate the official mission report, focusing on whether the pilot's score indicates
+            a heroic sacrifice, a masterful collection, or a reckless failure.`;
+
+        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${API_KEY}`;
+        
+        const payload = {
+            contents: [{ parts: [{ text: userQuery }] }],
+            systemInstruction: { parts: [{ text: systemPrompt }] },
+            config: { temperature: 0.8 } // Allow for more creative flair
+        };
+
+        try {
+            const response = await fetchWithRetry(apiUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            const result = await response.json();
+
+            const generatedText = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+            if (generatedText) {
+                currentDebriefText = generatedText.trim(); // STORE TEXT
+                debriefText.textContent = currentDebriefText;
+                
+                // SHOW LISTEN BUTTON
+                listenButton.classList.remove('hidden');
+                listenButton.textContent = "Listen to Debrief 🔊";
+                listenButton.disabled = false;
+            } else {
+                currentDebriefText = '';
+                debriefText.textContent = "ERROR: Transmission failed. Pilot's fate remains unknown.";
+                listenButton.classList.add('hidden');
+            }
+
+        } catch (error) {
+            console.error("Gemini API call failed:", error);
+            debriefText.textContent = "ERROR: Cannot establish quantum link with ORACLE-7. Check console for details.";
+        } finally {
+            debriefButton.textContent = "Debrief Generated";
+        }
+    }
+    
+    /**
+     * Calls the Gemini TTS API to generate and play audio for the debrief text.
+     */
+    async function readCosmicDebrief(textToSpeak) {
+        if (!textToSpeak) return;
+
+        listenButton.disabled = true;
+        listenButton.textContent = "TRANSMITTING...";
+        
+        const TTS_MODEL = "gemini-2.5-flash-preview-tts";
+        const TTS_VOICE = "Charon"; // Informative, good for a command AI
+
+        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${TTS_MODEL}:generateContent?key=${API_KEY}`;
+        
+        const payload = {
+            contents: [{ 
+                parts: [{ 
+                    text: `Read the following Star Command Debrief with an informative and formal tone: ${textToSpeak}`
+                }] 
+            }],
+            generationConfig: {
+                responseModalities: ["AUDIO"],
+                speechConfig: {
+                    voiceConfig: {
+                        prebuiltVoiceConfig: { voiceName: TTS_VOICE }
+                    }
+                }
+            }
+        };
+
+        try {
+            const response = await fetchWithRetry(apiUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            const result = await response.json();
+            const part = result?.candidates?.[0]?.content?.parts?.[0];
+            const audioData = part?.inlineData?.data;
+            const mimeType = part?.inlineData?.mimeType;
+
+            if (audioData && mimeType && mimeType.startsWith("audio/")) {
+                const match = mimeType.match(/rate=(\d+)/);
+                const sampleRate = match ? parseInt(match[1], 10) : 24000;
+                
+                const pcmData = base64ToArrayBuffer(audioData);
+                const pcm16 = new Int16Array(pcmData);
+                const wavBlob = pcmToWav(pcm16, sampleRate);
+                
+                const audioUrl = URL.createObjectURL(wavBlob);
+                
+                // Play the audio
+                const audio = new Audio(audioUrl);
+                audio.play();
+                
+                listenButton.textContent = "Playing...";
+                audio.onended = () => {
+                    listenButton.textContent = "Listen Again 🔊";
+                    listenButton.disabled = false;
+                };
+                
+            } else {
+                debriefText.textContent += "\n[TTS ERROR: Audio format incompatible or missing data.]";
+                listenButton.textContent = "Failed to Listen 🔊";
+                listenButton.disabled = false;
+            }
+
+        } catch (error) {
+            console.error("Gemini TTS API call failed:", error);
+            debriefText.textContent += "\n[TTS ERROR: Failed to generate audio.]";
+        } finally {
+            // Re-enable if error occurred before successful play start
+            if (listenButton.textContent === "TRANSMITTING...") {
+                listenButton.textContent = "Failed to Listen 🔊";
+                listenButton.disabled = false;
+            }
+        }
+    }
+
+
     // --- Game Objects and Drawing ---
 
     class Player {
@@ -369,10 +647,11 @@
             this.radius = radius;
             this.color = color;
             this.targetX = x; // Target position for smooth movement
-            this.speed = 450; // pixels per second
+            this.speed = 600; // Increased speed for desktop responsiveness
         }
 
         draw() {
+            if (gameState !== 'running') return; // Only draw when running
             // Draw a simple spaceship/triangle
             ctx.fillStyle = this.color;
             ctx.beginPath();
@@ -441,15 +720,15 @@
             const velocityY = Math.random() * 100 + 150;
             super(x, y, radius, ASTEROID_COLOR, velocityY);
             this.rotation = 0;
-            this.rotationSpeed = Math.random() * 0.5 - 0.25; // Random rotation direction
+            this.rotationSpeed = Math.random() * 2 - 1; // Faster rotation in radians/s
         }
 
         draw() {
             // Draw jagged asteroid shape instead of a perfect circle
             ctx.save();
             ctx.translate(this.x, this.y);
-            this.rotation += this.rotationSpeed * (lastTime - performance.now()) / 1000;
-            ctx.rotate(this.rotation);
+            // Use the rotation value calculated in the update method
+            ctx.rotate(this.rotation); 
 
             ctx.fillStyle = this.color;
             ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
@@ -472,6 +751,12 @@
             ctx.fill();
             ctx.stroke();
             ctx.restore();
+        }
+
+        update(deltaTime) {
+            super.update(deltaTime);
+            // FIX: Correctly update rotation using deltaTime
+            this.rotation += this.rotationSpeed * deltaTime;
         }
     }
 
@@ -558,25 +843,39 @@
     // --- Game Logic Functions ---
 
     function initGame() {
-        // Set canvas size based on container
-        const container = document.getElementById('gameContainer');
-        canvas.width = container.clientWidth;
-        canvas.height = container.clientHeight - 40; // Subtract UI panel height
+        // CRITICAL FIX: Set canvas size based on its actual rendered size in the DOM
+        const rect = canvas.getBoundingClientRect();
+        canvas.width = rect.width;
+        canvas.height = rect.height;
 
-        // Player initial position and target should be correctly set on resize/init
-        player = new Player(canvas.width / 2, canvas.height - 50, 15, PLAYER_COLOR);
+        // Player initial position should be based on the newly set canvas dimensions
+        // Place player near the bottom center (85% down from the top)
+        player = new Player(canvas.width / 2, canvas.height * 0.85, 15, PLAYER_COLOR);
         
         // Reset game state
         gameObjects = [];
         score = 0;
         lives = 3;
         timeSinceLastSpawn = 0; // Reset timer
+        currentDebriefText = ''; // Reset debrief text
         
         scoreDisplay.textContent = `SCORE: ${score}`;
         livesDisplay.textContent = `LIVES: ${lives}`;
         
         removeInputListeners(); // Clear old listeners before showing menu
-        showScreen('menu', 'ASTEROID ASSAULT', 'Collect stars, dodge danger!');
+        
+        // Hide LLM results when showing menu
+        debriefContainer.classList.add('hidden'); 
+        debriefButton.classList.add('hidden');
+        listenButton.classList.add('hidden'); // NEW: Hide TTS button
+        debriefButton.disabled = false;
+        debriefButton.textContent = "Generate Debrief ✨";
+        
+        showScreen('menu', 'ASTEROID ASSAULT', 'Move mouse to pilot the ship!');
+        
+        // Draw initial black screen/menu background
+        ctx.fillStyle = '#000008';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
     }
 
     function startGame() {
@@ -614,9 +913,14 @@
         startButton.textContent = (type === 'menu' || type === 'error') ? 'START GAME' : 'PLAY AGAIN';
         messageBox.classList.remove('hidden');
 
-        if (type === 'gameover' && isLeaderboardActive) {
+        if (type === 'gameover') {
+            debriefButton.classList.remove('hidden');
+            listenButton.classList.add('hidden'); // Initially hide listen button
             loadHighScores().then(renderLeaderboard);
         } else {
+            debriefButton.classList.add('hidden');
+            listenButton.classList.add('hidden'); // Ensure hidden on menu/start
+            debriefContainer.classList.add('hidden');
             renderLeaderboard(); // Renders placeholder if not active
         }
     }
@@ -625,9 +929,10 @@
     
     // Unified function to handle input position from mouse or touch
     function handleInput(clientX) {
-        if (gameState === 'running') {
+        if (gameState === 'running' && player) {
             const rect = canvas.getBoundingClientRect();
-            const relativeX = clientX - rect.left;
+            // Calculate the position relative to the canvas
+            const relativeX = clientX - rect.left; 
             player.setTargetX(relativeX);
         }
     }
@@ -635,6 +940,13 @@
     const mouseMoveHandler = (e) => {
         handleInput(e.clientX);
     };
+
+    const mouseOutHandler = () => {
+        // Optimization for desktop: If mouse leaves, stop horizontal movement
+        if(gameState === 'running' && player) {
+            player.setTargetX(player.x);
+        }
+    }
 
     const touchMoveHandler = (e) => {
         if (e.touches.length > 0) {
@@ -646,21 +958,32 @@
     // Function to add listeners
     function addInputListeners() {
         canvas.addEventListener('mousemove', mouseMoveHandler);
+        canvas.addEventListener('mouseout', mouseOutHandler); 
         canvas.addEventListener('touchmove', touchMoveHandler, { passive: false });
     }
 
     // Function to remove listeners
     function removeInputListeners() {
         canvas.removeEventListener('mousemove', mouseMoveHandler);
+        canvas.removeEventListener('mouseout', mouseOutHandler); 
         canvas.removeEventListener('touchmove', touchMoveHandler);
     }
+    
+    // Attach LLM button listeners
+    debriefButton.addEventListener('click', generateCosmicDebrief);
+    listenButton.addEventListener('click', () => {
+        if (currentDebriefText) {
+            readCosmicDebrief(currentDebriefText);
+        }
+    });
 
     // Handle start button click
     startButton.addEventListener('click', () => {
         if (gameState === 'loading' || gameState === 'error' || gameState === 'menu') {
             startGame();
         } else if (gameState === 'gameover') {
-            initGame();
+            // Re-initialize game to reset canvas size and player position before starting
+            initGame(); 
             startGame();
         }
     });
@@ -766,7 +1089,7 @@
         gameLoopId = requestAnimationFrame(gameLoop);
     }
     
-    // Resize handler to maintain aspect ratio and reposition player
+    // IMPORTANT FIX: When resizing, we must re-run initGame to correctly set canvas.width/height
     window.addEventListener('resize', initGame);
     
     // Start the Firebase initialization process
@@ -777,6 +1100,9 @@
     // --- PWA Service Worker Registration (Embedded) ---
     if ('serviceWorker' in navigator) {
         window.addEventListener('load', () => {
+            // Note: Service Worker is registered using the manifest.json path, 
+            // but the content should be provided in a separate service-worker.js file.
+            // For a single HTML file deployment, we rely on the manifest link.
             navigator.serviceWorker.register('manifest.json', { scope: './' })
                 .then(registration => {
                     console.log('ServiceWorker registered successfully: ', registration.scope);
@@ -790,4 +1116,3 @@
 </script>
 </body>
 </html>
-
