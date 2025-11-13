@@ -1,0 +1,863 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cosmic Collector</title>
+    <link rel="manifest" href="manifest.json"> 
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&display=swap');
+        
+        /* Custom styles for the game container and canvas */
+        body {
+            background-color: #0d0c1d; /* Deep Space Blue */
+            font-family: 'Orbitron', sans-serif;
+            color: #c9fbff;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            overflow: hidden;
+        }
+
+        #gameContainer {
+            position: relative;
+            width: 95vw;
+            max-width: 600px;
+            aspect-ratio: 1 / 1.5; /* Tall aspect ratio for mobile-friendly play area */
+            border: 4px solid #00f0ff;
+            box-shadow: 0 0 20px #00f0ff;
+            background-color: #000008;
+            border-radius: 12px;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        #gameCanvas {
+            flex-grow: 1;
+            display: block;
+            touch-action: none; /* Prevent default touch behavior */
+        }
+
+        #uiPanel {
+            background: rgba(0, 240, 255, 0.1);
+            padding: 8px 16px;
+            border-top: 2px solid #00f0ff;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 1rem;
+            text-shadow: 0 0 5px #00f0ff;
+            transition: background-color 0.1s; /* Add smooth transition for damage flash */
+        }
+
+        #messageBox {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            padding: 20px 40px;
+            background-color: rgba(0, 0, 0, 0.9);
+            border: 3px solid #ff4500;
+            box-shadow: 0 0 30px #ff4500;
+            border-radius: 10px;
+            text-align: center;
+            z-index: 100;
+            max-width: 90%; /* Ensure it fits on smaller screens */
+        }
+
+        .action-button {
+            background: linear-gradient(135deg, #ff4500, #ff8c00);
+            color: #0d0c1d;
+            font-family: 'Orbitron', sans-serif;
+            font-weight: 700;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            box-shadow: 0 4px 10px rgba(255, 69, 0, 0.5);
+            transition: all 0.2s ease;
+        }
+
+        .action-button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 15px rgba(255, 69, 0, 0.7);
+        }
+
+        .glow {
+            animation: pulse 1s infinite alternate;
+        }
+
+        @keyframes pulse {
+            from { text-shadow: 0 0 5px #c9fbff; }
+            to { text-shadow: 0 0 10px #00f0ff, 0 0 15px #00f0ff; }
+        }
+
+        /* Leaderboard Specific Styles */
+        #leaderboard {
+            width: 100%;
+            max-width: 300px;
+            margin: 20px auto 0;
+            text-align: left;
+            font-size: 0.85rem;
+            border-collapse: collapse;
+        }
+        #leaderboard th, #leaderboard td {
+            padding: 4px 8px;
+            border-bottom: 1px dashed rgba(0, 240, 255, 0.3);
+        }
+        #leaderboard th {
+            color: #00f0ff;
+            text-transform: uppercase;
+        }
+    </style>
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, collection, query, limit, addDoc, getDocs, orderBy, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Expose Firebase functions/objects globally for use in the main script block
+        window.firebase = {
+            initializeApp,
+            getAuth,
+            signInAnonymously,
+            signInWithCustomToken,
+            onAuthStateChanged,
+            getFirestore,
+            doc,
+            collection,
+            query,
+            limit,
+            addDoc,
+            getDocs,
+            orderBy,
+            setLogLevel
+        };
+    </script>
+</head>
+<body>
+
+<div id="gameContainer">
+    <canvas id="gameCanvas"></canvas>
+    <div id="uiPanel">
+        <span id="score" class="glow">SCORE: 0</span>
+        <span id="lives" class="glow">LIVES: 3</span>
+    </div>
+
+    <div id="messageBox" class="hidden">
+        <h2 id="messageTitle" class="text-2xl mb-4 text-orange-400"></h2>
+        <p id="messageBody" class="mb-6"></p>
+        <div id="leaderboard-container"></div>
+        <button id="startButton" class="action-button">START GAME</button>
+    </div>
+</div>
+
+<script type="text/javascript">
+    // --- Global Variables and Setup ---
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const scoreDisplay = document.getElementById('score');
+    const livesDisplay = document.getElementById('lives');
+    const messageBox = document.getElementById('messageBox');
+    const messageTitle = document.getElementById('messageTitle');
+    const messageBody = document.getElementById('messageBody');
+    const startButton = document.getElementById('startButton');
+    const leaderboardContainer = document.getElementById('leaderboard-container');
+
+    let gameLoopId;
+    let gameState = 'loading'; // Start in loading state for Firebase
+    let player, gameObjects, score, lives;
+    let lastTime = 0;
+    let timeToSpawn = 1.5;
+    let timeSinceLastSpawn = 0;
+    
+    const PLAYER_COLOR = '#00f0ff';
+    const ASTEROID_COLOR = '#ff4500';
+    const STAR_COLOR = '#ffff00';
+    const ENEMY_COLOR = '#ff00ff'; // Magenta for enemies/projectiles
+
+    // --- Firebase Variables ---
+    let db;
+    let auth;
+    let appId;
+    let userId;
+    let isAuthReady = false;
+    let highScores = [];
+
+    // --- Firebase Initialization and Auth ---
+
+    async function initFirebaseAndAuth() {
+        if (!window.firebase) {
+            console.error("Firebase SDKs not loaded.");
+            showScreen('error', 'Error', 'Firebase SDK failed to load.');
+            return;
+        }
+        
+        // 1. Get Config and App ID
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+        if (!firebaseConfig) {
+            console.error("Firebase config not available.");
+            showScreen('error', 'Error', 'Configuration missing. Cannot connect to database.');
+            return;
+        }
+
+        try {
+            // 2. Initialize App and Services
+            const app = firebase.initializeApp(firebaseConfig);
+            db = firebase.getFirestore(app);
+            auth = firebase.getAuth(app);
+            firebase.setLogLevel('debug'); // Set log level for debugging
+
+            // 3. Authenticate
+            await new Promise(resolve => {
+                const unsubscribe = firebase.onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        isAuthReady = true;
+                        console.log("Firebase initialized and signed in. User ID:", userId);
+                    } else {
+                        // Attempt custom token sign-in first, then anonymous sign-in
+                        const initialToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+                        if (initialToken) {
+                            await firebase.signInWithCustomToken(auth, initialToken);
+                            userId = auth.currentUser.uid;
+                        } else {
+                            await firebase.signInAnonymously(auth);
+                            userId = auth.currentUser.uid;
+                        }
+                        isAuthReady = true;
+                        console.log("Firebase initialized and authenticated.");
+                    }
+                    unsubscribe();
+                    resolve();
+                });
+            });
+
+            // Proceed to game initialization after auth is complete
+            initGame();
+        } catch (error) {
+            console.error("Firebase initialization failed:", error);
+            showScreen('error', 'Error', 'Authentication failed. Check console for details.');
+        }
+    }
+
+    // --- Firestore Logic ---
+
+    // Public collection path for high scores
+    function getScoresCollectionRef() {
+        if (!db) return null;
+        // Path: /artifacts/{appId}/public/data/highscores
+        return firebase.collection(db, 'artifacts', appId, 'public', 'data', 'highscores');
+    }
+
+    async function saveHighScore() {
+        if (!isAuthReady || score === 0) return;
+
+        const scoresRef = getScoresCollectionRef();
+        if (!scoresRef) return;
+
+        try {
+            // Use the user's ID as part of the document data, but let Firestore assign a random ID
+            await firebase.addDoc(scoresRef, {
+                score: score,
+                userId: userId,
+                timestamp: Date.now()
+            });
+            console.log("High score saved:", score);
+        } catch (e) {
+            console.error("Error saving high score:", e);
+        }
+    }
+
+    async function loadHighScores() {
+        if (!isAuthReady) return;
+
+        const scoresRef = getScoresCollectionRef();
+        if (!scoresRef) return;
+
+        try {
+            // Query for the top 10 scores, sorted descendingly
+            const q = firebase.query(
+                scoresRef,
+                // We fetch enough data and sort client-side to avoid needing additional Firestore indexes.
+                firebase.limit(100) 
+            );
+
+            const querySnapshot = await firebase.getDocs(q);
+            let results = [];
+            querySnapshot.forEach((doc) => {
+                results.push({ id: doc.id, ...doc.data() });
+            });
+
+            // Client-side sorting
+            results.sort((a, b) => b.score - a.score);
+            highScores = results.slice(0, 10); // Take top 10
+            
+            console.log("High scores loaded:", highScores);
+        } catch (e) {
+            console.error("Error loading high scores:", e);
+        }
+    }
+    
+    function renderLeaderboard() {
+        leaderboardContainer.innerHTML = ''; // Clear previous leaderboard
+
+        if (highScores.length === 0) {
+            leaderboardContainer.innerHTML = '<p class="mt-4 text-gray-500">No high scores yet.</p>';
+            return;
+        }
+
+        let html = '<table id="leaderboard" class="mx-auto">';
+        html += '<thead><tr><th>Rank</th><th>Score</th><th>User ID</th></tr></thead>';
+        html += '<tbody>';
+
+        highScores.forEach((entry, index) => {
+            // Highlight the current user's entry
+            const isCurrentUser = entry.userId === userId;
+            const rowClass = isCurrentUser ? 'text-orange-300 font-bold glow' : '';
+
+            html += `<tr class="${rowClass}">`;
+            html += `<td>${index + 1}</td>`;
+            html += `<td>${entry.score}</td>`;
+            // Only show the first 8 chars of the ID by default
+            html += `<td>${isCurrentUser ? entry.userId : entry.userId.substring(0, 8)}</td>`; 
+            html += '</tr>';
+        });
+
+        html += '</tbody></table>';
+        leaderboardContainer.innerHTML = html;
+        
+        // Also display the user's ID prominently
+        messageBody.innerHTML += `<p class="mt-4 text-sm text-blue-300">Your User ID: ${userId}</p>`;
+    }
+
+    // --- Utility Functions ---
+
+    function resizeCanvas() {
+        const container = document.getElementById('gameContainer');
+        canvas.width = container.clientWidth;
+        canvas.height = container.clientHeight - document.getElementById('uiPanel').offsetHeight;
+
+        if (player) {
+            player.x = canvas.width / 2;
+        }
+    }
+
+    /**
+     * Checks collision between the player (box) and any object (circle or box).
+     */
+    function checkCollision(obj) {
+        const pBounds = player.getBounds();
+
+        // 1. AABB vs AABB Collision (for EnemyShip)
+        if (obj.isEnemyShip) {
+            const eBounds = {
+                x: obj.x - obj.width / 2,
+                y: obj.y - obj.height / 2,
+                width: obj.width,
+                height: obj.height
+            };
+            return pBounds.x < eBounds.x + eBounds.width &&
+                   pBounds.x + pBounds.width > eBounds.x &&
+                   pBounds.y < eBounds.y + eBounds.height &&
+                   pBounds.y + pBounds.height > eBounds.y;
+        } 
+        
+        // 2. Circle/Point vs Player Box Center (for Projectile, Asteroid, Star)
+        // Uses the existing logic which relies on obj.radius
+        // Projectiles have a radius of 4, standard objects 10-25
+        const dx = obj.x - (pBounds.x + pBounds.width / 2);
+        const dy = obj.y - (pBounds.y + pBounds.height / 2);
+        const distance = Math.sqrt(dx * dx + dy * dy);
+        
+        return distance < (obj.radius || 0) + 10; // Use radius if available, else 0
+    }
+
+    // --- Game Classes (Updated) ---
+
+    class Player {
+        constructor(x, y) {
+            this.width = 30;
+            this.height = 30;
+            this.x = x;
+            this.y = y - this.height;
+            this.speed = 250;
+        }
+
+        update(deltaTime) {
+            if (this.targetX !== undefined) {
+                const dx = this.targetX - this.x;
+                const distance = Math.abs(dx);
+                const step = this.speed * deltaTime;
+
+                if (distance > step) {
+                    this.x += Math.sign(dx) * step;
+                } else {
+                    this.x = this.targetX;
+                }
+            }
+            
+            this.x = Math.max(this.width / 2, Math.min(canvas.width - this.width / 2, this.x));
+        }
+
+        draw() {
+            ctx.fillStyle = PLAYER_COLOR;
+            ctx.strokeStyle = '#c9fbff';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            
+            // Draw a simple, futuristic ship (triangle pointing up)
+            ctx.moveTo(this.x, this.y);
+            ctx.lineTo(this.x - this.width / 2, this.y + this.height);
+            ctx.lineTo(this.x + this.width / 2, this.y + this.height);
+            ctx.closePath();
+            
+            ctx.fill();
+            ctx.stroke();
+
+            // Simple thruster glow
+            ctx.fillStyle = 'rgba(255, 100, 0, 0.7)';
+            ctx.fillRect(this.x - 5, this.y + this.height, 10, 5);
+        }
+
+        getBounds() {
+            // Returns the player's bounding box
+            return {
+                x: this.x - this.width / 2,
+                y: this.y,
+                width: this.width,
+                height: this.height
+            };
+        }
+    }
+    
+    class EnemyProjectile {
+        constructor(x, y) {
+            this.x = x;
+            this.y = y;
+            this.radius = 4;
+            this.vy = 350; // Fast speed
+            this.color = ENEMY_COLOR;
+            this.destroyed = false;
+            this.isProjectile = true; // New identifier flag
+        }
+
+        update(deltaTime) {
+            this.y += this.vy * deltaTime;
+            if (this.y > canvas.height) {
+                this.destroyed = true;
+            }
+        }
+
+        draw() {
+            ctx.fillStyle = this.color;
+            ctx.shadowColor = this.color;
+            ctx.shadowBlur = 5;
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.shadowBlur = 0;
+        }
+    }
+
+    class EnemyShip {
+        constructor(x, y) {
+            this.x = x;
+            this.y = y;
+            this.width = 40;
+            this.height = 20;
+            this.vx = (Math.random() < 0.5 ? 1 : -1) * 70; // Slow horizontal movement
+            this.vy = 20; // Very slow downward movement
+            this.color = ENEMY_COLOR;
+            this.destroyed = false;
+            this.shootInterval = 1.0; // Shoot every 1 second
+            this.timeSinceLastShot = 0;
+            this.isEnemyShip = true; // New identifier flag
+        }
+
+        update(deltaTime) {
+            this.x += this.vx * deltaTime;
+            this.y += this.vy * deltaTime;
+
+            // Bounce off walls horizontally
+            if (this.x - this.width / 2 < 0 || this.x + this.width / 2 > canvas.width) {
+                this.vx *= -1;
+            }
+
+            // Shooting logic
+            this.timeSinceLastShot += deltaTime;
+            if (this.timeSinceLastShot >= this.shootInterval) {
+                this.shoot();
+                this.timeSinceLastShot = 0;
+            }
+            
+            // Check if off-screen (despawn)
+            if (this.y > canvas.height + this.height) {
+                this.destroyed = true;
+            }
+        }
+
+        shoot() {
+            // Fires a new projectile downward from the ship's center
+            const projectile = new EnemyProjectile(this.x, this.y + this.height / 2);
+            gameObjects.push(projectile);
+        }
+
+        draw() {
+            ctx.fillStyle = this.color;
+            ctx.strokeStyle = '#c9fbff';
+            ctx.lineWidth = 2;
+
+            // Draw a flat, boxy ship
+            ctx.fillRect(this.x - this.width / 2, this.y - this.height / 2, this.width, this.height);
+            ctx.strokeRect(this.x - this.width / 2, this.y - this.height / 2, this.width, this.height);
+        }
+    }
+
+    class GameObject {
+        // Used for Stars and Asteroids
+        constructor(x, y, radius, type) {
+            this.x = x;
+            this.y = y;
+            this.radius = radius;
+            this.type = type; // 'asteroid' or 'star'
+            this.vy = type === 'star' ? 100 : 150;
+            this.color = type === 'star' ? STAR_COLOR : ASTEROID_COLOR;
+            this.destroyed = false;
+        }
+
+        update(deltaTime) {
+            this.y += this.vy * deltaTime;
+            if (this.y > canvas.height + this.radius) {
+                this.destroyed = true;
+            }
+        }
+
+        draw() {
+            ctx.fillStyle = this.color;
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+            ctx.fill();
+            
+            if (this.type === 'asteroid') {
+                ctx.strokeStyle = '#ff8c00';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            } else {
+                ctx.shadowColor = STAR_COLOR;
+                ctx.shadowBlur = 10;
+                ctx.fillStyle = STAR_COLOR;
+                ctx.fill();
+                ctx.shadowBlur = 0;
+            }
+        }
+    }
+
+    // --- Game Logic ---
+
+    async function initGame() {
+        score = 0;
+        lives = 3;
+        resizeCanvas();
+
+        player = new Player(canvas.width / 2, canvas.height - 10);
+        player.targetX = player.x;
+
+        gameObjects = [];
+        timeToSpawn = 1.5;
+        timeSinceLastSpawn = 0;
+
+        updateUI();
+        
+        await loadHighScores(); 
+        showScreen('menu', 'ASTEROID ASSAULT', 'Collect stars, dodge debris (orange) and enemy fire (magenta).');
+    }
+
+    function startGame() {
+        if (gameState !== 'running') {
+            gameState = 'running';
+            messageBox.classList.add('hidden');
+            lastTime = performance.now(); 
+            gameLoopId = requestAnimationFrame(gameLoop);
+        }
+    }
+
+    function showScreen(mode, title = '', body = '') {
+        gameState = mode;
+        if (mode === 'running') {
+            messageBox.classList.add('hidden');
+            leaderboardContainer.innerHTML = '';
+        } else {
+            messageTitle.textContent = title;
+            messageBody.textContent = body;
+            startButton.textContent = mode === 'menu' ? 'START GAME' : 'RESTART';
+            messageBox.classList.remove('hidden');
+            
+            if (mode === 'menu' || mode === 'gameover') {
+                renderLeaderboard();
+            }
+        }
+    }
+
+    function spawnObject() {
+        const x = Math.random() * canvas.width;
+        
+        // 90% chance for standard object, 10% chance for Enemy Ship
+        if (Math.random() < 0.1) { 
+            // Spawn EnemyShip near the top
+            gameObjects.push(new EnemyShip(x, 0));
+        } else {
+            const radius = Math.random() * 15 + 10;
+            const type = Math.random() < 0.7 ? 'star' : 'asteroid'; // 70% stars, 30% asteroids
+            gameObjects.push(new GameObject(x, -radius, radius, type));
+        }
+
+        // Difficulty increases by decreasing spawn time
+        timeToSpawn = Math.max(0.3, timeToSpawn * 0.99); 
+    }
+
+    function handleDamage(flashColor = 'rgba(255, 0, 0, 0.4)') {
+        lives -= 1;
+        document.getElementById('uiPanel').style.backgroundColor = flashColor;
+        setTimeout(() => {
+            document.getElementById('uiPanel').style.backgroundColor = 'rgba(0, 240, 255, 0.1)';
+        }, 100);
+    }
+
+    function update(deltaTime) {
+        if (gameState !== 'running') return;
+
+        // 1. Spawn Logic
+        timeSinceLastSpawn += deltaTime;
+        if (timeSinceLastSpawn >= timeToSpawn) {
+            spawnObject();
+            timeSinceLastSpawn = 0;
+        }
+
+        // 2. Update and check collisions for all objects
+        for (let i = gameObjects.length - 1; i >= 0; i--) {
+            const obj = gameObjects[i];
+            
+            // Call update() on the object, which handles movement AND enemy shooting
+            obj.update(deltaTime); 
+
+            if (checkCollision(obj)) {
+                obj.destroyed = true;
+
+                // Handle damage/score based on object type
+                if (obj.isProjectile) {
+                    // Collision with Enemy Projectile (Red flash)
+                    handleDamage('rgba(255, 0, 0, 0.4)');
+                }
+                else if (obj.isEnemyShip) {
+                    // Collision with Enemy Ship (Instant Game Over)
+                    lives = 0; 
+                    handleDamage('rgba(255, 0, 0, 0.8)'); // Very intense flash
+                }
+                else if (obj.type === 'star') {
+                    // Collision with Star (Score up)
+                    score += 10;
+                } else if (obj.type === 'asteroid') {
+                    // Collision with Asteroid (Orange flash)
+                    handleDamage('rgba(255, 69, 0, 0.4)'); 
+                }
+            }
+        }
+        
+        // 3. Clean up destroyed/off-screen objects
+        gameObjects = gameObjects.filter(obj => !obj.destroyed);
+
+        // 4. Update Player
+        player.update(deltaTime);
+
+        // 5. Update UI and check Game Over
+        updateUI();
+
+        if (lives <= 0) {
+            gameOver();
+        }
+    }
+
+    function draw() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        
+        ctx.fillStyle = '#000008';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        player.draw();
+        gameObjects.forEach(obj => obj.draw());
+    }
+
+    function updateUI() {
+        scoreDisplay.textContent = `SCORE: ${score}`;
+        livesDisplay.textContent = `LIVES: ${lives}`;
+    }
+
+    async function gameOver() {
+        cancelAnimationFrame(gameLoopId);
+        
+        await saveHighScore();
+        await loadHighScores();
+
+        showScreen(
+            'gameover', 
+            'GAME OVER', 
+            `Your ship was disabled! Final Score: ${score}`
+        );
+    }
+
+    // --- Game Loop ---
+
+    function gameLoop(timestamp) {
+        const deltaTime = (timestamp - lastTime) / 1000;
+        lastTime = timestamp;
+
+        if (gameState === 'running') {
+            update(deltaTime);
+            draw();
+        }
+
+        gameLoopId = requestAnimationFrame(gameLoop);
+    }
+
+    // --- Input Handlers and Initialization ---
+    
+    function handlePointerMove(event) {
+        if (gameState !== 'running') return;
+        
+        const rect = canvas.getBoundingClientRect();
+        const clientX = event.touches ? event.touches[0].clientX : event.clientX;
+        const targetX = clientX - rect.left;
+        
+        player.targetX = targetX;
+        
+        if (event.touches) {
+            event.preventDefault();
+        }
+    }
+    
+    function handleKeydown(event) {
+        if (event.key === ' ' && gameState !== 'running') {
+            startGame();
+        }
+    }
+
+    // Attach listeners
+    canvas.addEventListener('mousemove', handlePointerMove);
+    canvas.addEventListener('touchmove', handlePointerMove, { passive: false });
+    
+    startButton.addEventListener('click', () => {
+        if (gameState === 'menu' || gameState === 'gameover') {
+            startGame();
+        }
+    });
+
+    document.addEventListener('keydown', handleKeydown);
+    window.addEventListener('resize', resizeCanvas);
+
+    // Initial load starts the Firebase initialization
+    window.onload = initFirebaseAndAuth;
+
+    // --- PWA Service Worker Logic and Registration (Embedded) ---
+    const serviceWorkerContent = `
+        const CACHE_NAME = 'cosmic-collector-v1';
+        // List all files and critical external dependencies that must be cached for offline play.
+        const urlsToCache = [
+            '/', // Caches index.html
+            'manifest.json',
+            // External Critical Dependencies:
+            'https://cdn.tailwindcss.com',
+            'https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&display=swap',
+            // Firebase SDKs are required for leaderboards but will load from cache when offline.
+            'https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js',
+            'https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js',
+            'https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js',
+        ];
+
+        // 1. Install Event: Caches all static assets
+        self.addEventListener('install', (event) => {
+            // Force the waiting service worker to become the active service worker
+            self.skipWaiting();
+            
+            event.waitUntil(
+                caches.open(CACHE_NAME)
+                    .then((cache) => {
+                        console.log('Service Worker: Caching App Shell assets.');
+                        // Attempt to cache all URLs, catching errors for external resources that might fail initially
+                        return cache.addAll(urlsToCache).catch((error) => {
+                            console.error('Service Worker: Failed to cache some URLs:', error);
+                        });
+                    })
+            );
+        });
+
+        // 2. Activate Event: Cleans up old caches
+        self.addEventListener('activate', (event) => {
+            event.waitUntil(
+                caches.keys().then((cacheNames) => {
+                    return Promise.all(
+                        cacheNames.map((cacheName) => {
+                            if (cacheName !== CACHE_NAME) {
+                                console.log('Service Worker: Deleting old cache:', cacheName);
+                                return caches.delete(cacheName);
+                            }
+                        })
+                    );
+                })
+            );
+        });
+
+        // 3. Fetch Event: Serves content from cache first, then falls back to network
+        self.addEventListener('fetch', (event) => {
+            // Only respond to GET requests
+            if (event.request.method !== 'GET') return;
+            
+            // Intercept requests and serve from cache if available
+            event.respondWith(
+                caches.match(event.request)
+                    .then((response) => {
+                        // Cache hit - return response
+                        if (response) {
+                            return response;
+                        }
+                        // No cache hit - fetch from network
+                        return fetch(event.request);
+                    })
+            );
+        });
+    `;
+
+
+    if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+            try {
+                // 1. Create a Blob from the SW content string, ensuring correct MIME type
+                const swBlob = new Blob([serviceWorkerContent], { type: 'application/javascript' });
+                // 2. Create an object URL for the Blob (this starts with 'blob:')
+                const swUrl = URL.createObjectURL(swBlob);
+                
+                // 3. Register the Blob URL. The browser can now handle this protocol.
+                navigator.serviceWorker.register(swUrl, { scope: '/' })
+                    .then(registration => {
+                        console.log('Service Worker registered successfully via Blob URL:', registration.scope);
+                        // Clean up the Blob URL after registration attempt
+                        URL.revokeObjectURL(swUrl); 
+                    })
+                    .catch(error => {
+                        console.error('Service Worker registration failed:', error);
+                    });
+            } catch (e) {
+                console.error('Service Worker registration error during Blob creation:', e);
+            }
+        });
+    }
+
+</script>
+
+</body>
+</html>
